@@ -1,0 +1,154 @@
+import streamlit as st
+import numpy as np
+import pandas as pd
+
+st.set_page_config(page_title="MTCT Simulator", layout="wide")
+
+# -----------------------------
+# 1. FIXED PARAMETERS
+# -----------------------------
+NMp = 42660
+
+pi_T = 0.02   # ART baseline
+pi_N = 0.10   # diagnosed, no ART
+pi_U = 0.15   # undiagnosed
+pi_BF = 0.03  # breastfeeding
+
+# -----------------------------
+# 2. CORE FUNCTION
+# -----------------------------
+def compute_mtct(p_diag, p_ART, p_suppressed, bf_scale):
+    p_ART = min(p_ART, p_diag)
+    p_suppressed = min(p_suppressed, p_ART)
+
+    PPU = NMp * (1 - p_diag)
+    PPN = NMp * p_diag * (1 - p_ART)
+    PPA = NMp * p_diag * p_ART
+
+    effective_pi_T = pi_T * (1 - p_suppressed)
+
+    birth_inf = (
+        PPU * pi_U +
+        PPN * pi_N +
+        PPA * effective_pi_T
+    )
+
+    bf_inf = NMp * pi_BF * bf_scale
+
+    total_inf = birth_inf + bf_inf
+    mtct_rate = total_inf / NMp
+
+    return mtct_rate, birth_inf, bf_inf, total_inf, PPU, PPN, PPA
+
+# -----------------------------
+# 3. SIDEBAR INPUTS
+# -----------------------------
+st.sidebar.header("Policy Levers")
+
+p_diag = st.sidebar.slider("Diagnosis Rate", 0.80, 0.99, 0.92)
+p_ART = st.sidebar.slider("ART Coverage", 0.80, 0.99, 0.90)
+p_suppressed = st.sidebar.slider("Viral Suppression", 0.70, 0.99, 0.85)
+bf_scale = st.sidebar.slider("Breastfeeding Risk Scale", 0.5, 1.5, 1.0)
+
+target = st.sidebar.slider("Target MTCT (%)", 0.5, 5.0, 2.0) / 100
+
+# -----------------------------
+# 4. MAIN RESULTS
+# -----------------------------
+st.title("MTCT Optimization Dashboard")
+
+mtct, birth_inf, bf_inf, total_inf, PPU, PPN, PPA = compute_mtct(
+    p_diag, p_ART, p_suppressed, bf_scale
+)
+
+col1, col2, col3 = st.columns(3)
+
+col1.metric("MTCT Rate", f"{mtct:.2%}")
+col2.metric("Total Infections", int(total_inf))
+col3.metric("Gap to Target", f"{(mtct - target):.2%}")
+
+# -----------------------------
+# 5. BREAKDOWN
+# -----------------------------
+st.subheader("Population Breakdown")
+
+df_pop = pd.DataFrame({
+    "Group": ["Undiagnosed", "Diagnosed No ART", "On ART"],
+    "Count": [PPU, PPN, PPA]
+})
+
+st.bar_chart(df_pop.set_index("Group"))
+
+# -----------------------------
+# 6. INFECTION BREAKDOWN
+# -----------------------------
+st.subheader("Infection Breakdown")
+
+df_inf = pd.DataFrame({
+    "Type": ["Birth", "Breastfeeding"],
+    "Infections": [birth_inf, bf_inf]
+})
+
+st.bar_chart(df_inf.set_index("Type"))
+
+# -----------------------------
+# 7. SENSITIVITY ANALYSIS
+# -----------------------------
+st.subheader("Sensitivity: Coverage vs MTCT")
+
+coverage_vals = np.linspace(0.80, 0.99, 20)
+results = []
+
+for p in coverage_vals:
+    mtct_tmp, *_ = compute_mtct(p, p, p, bf_scale)
+    results.append((p, mtct_tmp))
+
+df_sens = pd.DataFrame(results, columns=["Coverage", "MTCT"])
+st.line_chart(df_sens.set_index("Coverage"))
+
+# -----------------------------
+# 8. OPTIMIZATION BUTTON
+# -----------------------------
+st.subheader("Find Minimum Requirements")
+
+if st.button("Run Optimization"):
+
+    solutions = []
+
+    for d in np.linspace(0.85, 0.99, 10):
+        for a in np.linspace(0.85, 0.99, 10):
+            for s in np.linspace(0.80, 0.99, 10):
+
+                mtct_tmp, *_ = compute_mtct(d, a, s, bf_scale)
+
+                if mtct_tmp <= target:
+                    solutions.append((d, a, s, mtct_tmp))
+
+    if solutions:
+        df_sol = pd.DataFrame(solutions, columns=["Diagnosis", "ART", "Suppression", "MTCT"])
+        df_sol = df_sol.sort_values(by=["Diagnosis", "ART", "Suppression"])
+
+        st.success("Feasible solutions found")
+        st.dataframe(df_sol.head())
+
+        best = df_sol.iloc[0]
+
+        st.write("### Minimum Thresholds")
+        st.write(f"Diagnosis ≥ {best['Diagnosis']:.2%}")
+        st.write(f"ART ≥ {best['ART']:.2%}")
+        st.write(f"Suppression ≥ {best['Suppression']:.2%}")
+        st.write(f"MTCT = {best['MTCT']:.2%}")
+
+    else:
+        st.error("No solution found for target")
+
+# -----------------------------
+# 9. FOOTER INSIGHT
+# -----------------------------
+st.markdown("---")
+st.markdown(
+"""
+**Insight:** Viral suppression has the largest impact on reducing MTCT.  
+Focus on improving adherence and early ART initiation to achieve targets.
+"""
+)
