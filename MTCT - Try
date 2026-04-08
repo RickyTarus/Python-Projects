@@ -1,154 +1,175 @@
-import streamlit as st
 import numpy as np
 import pandas as pd
 
-st.set_page_config(page_title="MTCT Simulator", layout="wide")
-
 # -----------------------------
-# 1. FIXED PARAMETERS
+# 1. FIXED MODEL PARAMETERS
 # -----------------------------
-NMp = 42660
+NMp = 42660  # total HIV+ pregnancies
 
-pi_T = 0.02   # ART baseline
+# Baseline transmission risks (can be tuned from posterior means)
+pi_T = 0.02   # on ART (baseline before suppression adjustment)
 pi_N = 0.10   # diagnosed, no ART
 pi_U = 0.15   # undiagnosed
 pi_BF = 0.03  # breastfeeding
 
+
 # -----------------------------
-# 2. CORE FUNCTION
+# 2. CORE SIMULATION FUNCTION
 # -----------------------------
-def compute_mtct(p_diag, p_ART, p_suppressed, bf_scale):
+def compute_mtct(p_diag, p_ART, p_suppressed, bf_scale=1.0):
+    """
+    Computes MTCT rate given system performance inputs.
+
+    Parameters:
+        p_diag: proportion diagnosed
+        p_ART: proportion of diagnosed on ART
+        p_suppressed: proportion on ART virally suppressed
+        bf_scale: multiplier for breastfeeding risk (intervention effect)
+
+    Returns:
+        dict with MTCT metrics
+    """
+
+    # Enforce logical constraints
     p_ART = min(p_ART, p_diag)
     p_suppressed = min(p_suppressed, p_ART)
 
+    # Population splits
     PPU = NMp * (1 - p_diag)
     PPN = NMp * p_diag * (1 - p_ART)
     PPA = NMp * p_diag * p_ART
 
+    # Effective ART transmission (reduced by suppression)
     effective_pi_T = pi_T * (1 - p_suppressed)
 
+    # Birth infections
     birth_inf = (
         PPU * pi_U +
         PPN * pi_N +
         PPA * effective_pi_T
     )
 
+    # Breastfeeding infections
     bf_inf = NMp * pi_BF * bf_scale
 
     total_inf = birth_inf + bf_inf
     mtct_rate = total_inf / NMp
 
-    return mtct_rate, birth_inf, bf_inf, total_inf, PPU, PPN, PPA
+    return {
+        "MTCT_rate": mtct_rate,
+        "birth_infections": birth_inf,
+        "bf_infections": bf_inf,
+        "total_infections": total_inf,
+        "PPU": PPU,
+        "PPN": PPN,
+        "PPA": PPA
+    }
+
 
 # -----------------------------
-# 3. SIDEBAR INPUTS
+# 3. SCENARIO TEST (SINGLE RUN)
 # -----------------------------
-st.sidebar.header("Policy Levers")
+def run_scenario():
+    result = compute_mtct(
+        p_diag=0.92,
+        p_ART=0.90,
+        p_suppressed=0.85
+    )
 
-p_diag = st.sidebar.slider("Diagnosis Rate", 0.80, 0.99, 0.92)
-p_ART = st.sidebar.slider("ART Coverage", 0.80, 0.99, 0.90)
-p_suppressed = st.sidebar.slider("Viral Suppression", 0.70, 0.99, 0.85)
-bf_scale = st.sidebar.slider("Breastfeeding Risk Scale", 0.5, 1.5, 1.0)
+    print("=== Scenario Result ===")
+    for k, v in result.items():
+        if "rate" in k:
+            print(f"{k}: {v:.2%}")
+        else:
+            print(f"{k}: {int(v)}")
 
-target = st.sidebar.slider("Target MTCT (%)", 0.5, 5.0, 2.0) / 100
-
-# -----------------------------
-# 4. MAIN RESULTS
-# -----------------------------
-st.title("MTCT Optimization Dashboard")
-
-mtct, birth_inf, bf_inf, total_inf, PPU, PPN, PPA = compute_mtct(
-    p_diag, p_ART, p_suppressed, bf_scale
-)
-
-col1, col2, col3 = st.columns(3)
-
-col1.metric("MTCT Rate", f"{mtct:.2%}")
-col2.metric("Total Infections", int(total_inf))
-col3.metric("Gap to Target", f"{(mtct - target):.2%}")
 
 # -----------------------------
-# 5. BREAKDOWN
+# 4. GRID SEARCH OPTIMIZATION
 # -----------------------------
-st.subheader("Population Breakdown")
+def optimize_mtct(target=0.02):
+    results = []
 
-df_pop = pd.DataFrame({
-    "Group": ["Undiagnosed", "Diagnosed No ART", "On ART"],
-    "Count": [PPU, PPN, PPA]
-})
+    p_diag_vals = np.linspace(0.85, 0.99, 10)
+    p_ART_vals = np.linspace(0.85, 0.99, 10)
+    p_sup_vals = np.linspace(0.80, 0.98, 10)
 
-st.bar_chart(df_pop.set_index("Group"))
+    for p_diag in p_diag_vals:
+        for p_ART in p_ART_vals:
+            for p_sup in p_sup_vals:
 
-# -----------------------------
-# 6. INFECTION BREAKDOWN
-# -----------------------------
-st.subheader("Infection Breakdown")
+                res = compute_mtct(p_diag, p_ART, p_sup)
 
-df_inf = pd.DataFrame({
-    "Type": ["Birth", "Breastfeeding"],
-    "Infections": [birth_inf, bf_inf]
-})
+                if res["MTCT_rate"] <= target:
+                    results.append({
+                        "p_diag": p_diag,
+                        "p_ART": p_ART,
+                        "p_suppressed": p_sup,
+                        "MTCT_rate": res["MTCT_rate"]
+                    })
 
-st.bar_chart(df_inf.set_index("Type"))
+    df = pd.DataFrame(results)
 
-# -----------------------------
-# 7. SENSITIVITY ANALYSIS
-# -----------------------------
-st.subheader("Sensitivity: Coverage vs MTCT")
+    if df.empty:
+        print("No feasible solution found.")
+        return None
 
-coverage_vals = np.linspace(0.80, 0.99, 20)
-results = []
+    # Sort by lowest effort (simple heuristic)
+    df = df.sort_values(by=["p_diag", "p_ART", "p_suppressed"])
 
-for p in coverage_vals:
-    mtct_tmp, *_ = compute_mtct(p, p, p, bf_scale)
-    results.append((p, mtct_tmp))
+    return df
 
-df_sens = pd.DataFrame(results, columns=["Coverage", "MTCT"])
-st.line_chart(df_sens.set_index("Coverage"))
 
 # -----------------------------
-# 8. OPTIMIZATION BUTTON
+# 5. FIND MINIMUM THRESHOLDS
 # -----------------------------
-st.subheader("Find Minimum Requirements")
+def find_minimum_thresholds(target=0.02):
+    df = optimize_mtct(target)
 
-if st.button("Run Optimization"):
+    if df is None:
+        return
 
-    solutions = []
+    best = df.iloc[0]
 
-    for d in np.linspace(0.85, 0.99, 10):
-        for a in np.linspace(0.85, 0.99, 10):
-            for s in np.linspace(0.80, 0.99, 10):
+    print("\n=== Minimum Requirements for ≤2% MTCT ===")
+    print(f"Diagnosis rate ≥ {best['p_diag']:.2%}")
+    print(f"ART coverage ≥ {best['p_ART']:.2%}")
+    print(f"Suppression rate ≥ {best['p_suppressed']:.2%}")
+    print(f"Achieved MTCT: {best['MTCT_rate']:.2%}")
 
-                mtct_tmp, *_ = compute_mtct(d, a, s, bf_scale)
-
-                if mtct_tmp <= target:
-                    solutions.append((d, a, s, mtct_tmp))
-
-    if solutions:
-        df_sol = pd.DataFrame(solutions, columns=["Diagnosis", "ART", "Suppression", "MTCT"])
-        df_sol = df_sol.sort_values(by=["Diagnosis", "ART", "Suppression"])
-
-        st.success("Feasible solutions found")
-        st.dataframe(df_sol.head())
-
-        best = df_sol.iloc[0]
-
-        st.write("### Minimum Thresholds")
-        st.write(f"Diagnosis ≥ {best['Diagnosis']:.2%}")
-        st.write(f"ART ≥ {best['ART']:.2%}")
-        st.write(f"Suppression ≥ {best['Suppression']:.2%}")
-        st.write(f"MTCT = {best['MTCT']:.2%}")
-
-    else:
-        st.error("No solution found for target")
 
 # -----------------------------
-# 9. FOOTER INSIGHT
+# 6. SENSITIVITY ANALYSIS
 # -----------------------------
-st.markdown("---")
-st.markdown(
-"""
-**Insight:** Viral suppression has the largest impact on reducing MTCT.  
-Focus on improving adherence and early ART initiation to achieve targets.
-"""
-)
+def sensitivity_analysis():
+    p_vals = np.linspace(0.80, 0.99, 20)
+
+    results = []
+
+    for p in p_vals:
+        res = compute_mtct(
+            p_diag=p,
+            p_ART=p,
+            p_suppressed=p
+        )
+        results.append((p, res["MTCT_rate"]))
+
+    df = pd.DataFrame(results, columns=["coverage", "MTCT_rate"])
+    print(df.head())
+
+    return df
+
+
+# -----------------------------
+# 7. MAIN ENTRY POINT
+# -----------------------------
+if __name__ == "__main__":
+    run_scenario()
+
+    df = optimize_mtct(target=0.02)
+
+    if df is not None:
+        print("\nTop feasible solutions:")
+        print(df.head())
+
+    find_minimum_thresholds(target=0.02)
